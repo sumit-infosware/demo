@@ -1,0 +1,960 @@
+generator client {
+  provider = "prisma-client"
+  output   = "./generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── User ────────────────────────────────────────────────────
+model User {
+  id          String    @id @default(uuid()) @db.Uuid
+  email       String    @unique
+  password    String    @map("password_hash")
+  firstName   String    @map("first_name")
+  lastName    String    @map("last_name")
+  isActive    Boolean   @default(true) @map("is_active")
+  lastLoginAt DateTime? @map("last_login_at")
+  deletedAt   DateTime? @map("deleted_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  roles                  UserRole[]
+  sessions               Session[]
+  auditLogs              AuditLog[]
+  acknowledgedAlerts     Alert[]                 @relation("AlertAcknowledgedBy")
+  countedLineCounts      LineCount[]             @relation("LineCountCountedBy")
+  countedBaselines       Baseline[]              @relation("BaselineCountedBy")
+  fetchedBinningPlans    BinningPlan[]           @relation("BinningPlanFetchedBy")
+  planDownloads          PlanDownload[]          @relation("PlanDownloadDownloadedBy")
+  placementConfirmations PlacementConfirmation[] @relation("PlacementConfirmationOperator")
+  // Note: User as operator uses operatorId field in PlacementConfirmation
+
+  @@index([deletedAt])
+  @@map("users")
+}
+
+// ─── Role ────────────────────────────────────────────────────
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique
+  description String?
+  isSystem    Boolean  @default(false) @map("is_system")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  users       UserRole[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+// ─── Permission ──────────────────────────────────────────────
+model Permission {
+  id          String   @id @default(uuid()) @db.Uuid
+  code        String   @unique // e.g. "users.read"
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+// ─── Join: User ↔ Role ──────────────────────────────────────
+model UserRole {
+  userId String @map("user_id") @db.Uuid
+  roleId String @map("role_id") @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@index([roleId])
+  @@map("user_roles")
+}
+
+// ─── Join: Role ↔ Permission ────────────────────────────────
+model RolePermission {
+  roleId       String     @map("role_id") @db.Uuid
+  permissionId String     @map("permission_id") @db.Uuid
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+// ─── Session (refresh-token rotation chain) ─────────────────
+model Session {
+  id                String    @id @default(uuid()) @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  familyId          String    @map("family_id") @db.Uuid
+  tokenHash         String    @unique @map("token_hash")
+  jti               String    @unique
+  userAgent         String?   @map("user_agent")
+  ip                String?
+  expiresAt         DateTime  @map("expires_at")
+  revokedAt         DateTime? @map("revoked_at")
+  replacedByTokenId String?   @map("replaced_by_token_id")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt, expiresAt])
+  @@map("sessions")
+}
+
+// ─── Audit Log ──────────────────────────────────────────────
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String?  @map("user_id") @db.Uuid
+  action     String
+  screen     String?
+  resource   String
+  description String?
+  resourceId String?  @map("resource_id")
+  result     String?  @default("success")
+  ip         String?
+  userAgent  String?  @map("user_agent")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@map("audit_logs")
+}
+
+// ─── Receiving Report (RR) ───────────────────────────────────
+model Rr {
+  id          BigInt    @id @default(autoincrement())
+  rrNo        String    @unique @map("rr_no")
+  gateEntryNo String?   @map("gate_entry_no") // IFS GATE_ENTRY_NO mirror
+  ownership   String?   @map("ownership") @db.VarChar(10) // comes from ifs (GATE_ENTRY_HEADER.PREFIX → Company | Repair)
+  receiptNo   String?   @map("receipt_no") // NEW: Import
+  sourceType  String    @default("DOMESTIC") @map("source_type")
+  vendorName  String?   @map("vendor_name")
+  vendorNo    String?   @map("vendor_no") // NEW: IFS Mirror
+  contract    String? // NEW: IFS Mirror
+  challanNo   String?   @map("challan_no") // NEW: IFS Mirror
+  challanDate DateTime? @map("challan_date") @db.Date // NEW: IFS Mirror
+  rrStatus    String    @map("rr_status")
+  rrDate      DateTime  @map("rr_date") @db.Date // comes from ifs (GATE_ENTRY_HEADER.GATE_ENTRY_DATE)
+  fetchedAt   DateTime  @default(now()) @map("fetched_at") @db.Timestamptz()
+  lines RrLine[]
+
+  @@index([rrNo])
+  @@map("rr")
+}
+
+// ─── RR Line ─────────────────────────────────────────────────
+model RrLine {
+id          BigInt    @id @default(autoincrement())
+  rrId            BigInt  @map("rr_id")
+  rrLineNo        String  @map("rr_line_no")
+  gateEntryNo     String? @map("gate_entry_no") // NEW
+  gateEntryLineNo String? @map("gate_entry_line_no") // NEW
+  receiptNo       String? @map("receipt_no") // NEW
+
+  itemCode         String   @map("item_code")
+  itemDesc         String?  @map("item_desc")
+  category         String?
+  orderedQty       Decimal  @map("ordered_qty") @db.Decimal(18, 4)
+  receivedQty      Decimal? @map("received_qty") @db.Decimal(18, 4)
+  acceptedQty      Decimal? @map("accepted_qty") @db.Decimal(18, 4) // NEW
+  vendorUom        String?  @map("vendor_uom")
+  stockingUom      String?  @map("stocking_uom")
+
+  qcStatus          String?   @map("qc_status") // comes from ifs (GATE_ENTRY_DETAIL.STATUS)
+  isChargeApproved  Boolean   @default(false) @map("is_charge_approved") // comes from ifs (GATE_ENTRY_DETAIL.CHARGES_APPROVED)
+  isHold            Boolean   @default(false) @map("is_hold") // comes from ifs (GATE_ENTRY_DETAIL.HOLD)
+  chargeStatus      String?   @map("charge_status")
+  chargesApprovedAt DateTime? @map("charges_approved_at") @db.Timestamptz() // NEW
+  inventoryQty      Decimal?  @map("inventory_qty") @db.Decimal(18, 4) // comes from ifs (GATE_ENTRY_DETAIL.INVENTORY_QTY)
+  conversionFactor  Decimal?  @map("conversion_factor") @db.Decimal(18, 6) // comes from ifs (GATE_ENTRY_DETAIL.CONVERSION_FACTOR)
+  noteText          String?   @map("note_text") // comes from ifs (GATE_ENTRY_DETAIL.NOTE_TEXT raw mirror)
+
+  batchNo           String?  @map("batch_no")
+  numPackages       Int?     @map("num_packages")
+  qtyPerPackage     Decimal? @map("qty_per_package") @db.Decimal(18, 4)
+  computedTotalQty  Decimal? @map("computed_total_qty") @db.Decimal(18, 4)
+  alternateItemCode String?  @map("alternate_item_code")
+  originalItemCode  String?  @map("original_item_code")
+  fetchedAt         DateTime @default(now()) @map("fetched_at") @db.Timestamptz()
+
+  itemType                String    @default("BULK") @map("item_type")
+  serialNumbers           String?   @map("serial_numbers")
+  // NEW: one-shot dedupe for the "serials missing" alert — set when a
+  // serialized line has no parsed serials and the WARNING was raised, cleared
+  // once serials arrive so a later loss can re-alert (flow cell 548).
+  serialsMissingAlerted   Boolean   @default(false) @map("serials_missing_alerted")
+  serialsMissingAlertedAt DateTime? @map("serials_missing_alerted_at") @db.Timestamptz()
+  isSerialized            Boolean   @default(false) @map("is_serialized")
+  materialType            String?   @map("material_type")
+  cocDocumentUrl          String?   @map("coc_document_url")
+  requiresEngraving       Boolean   @default(false) @map("requires_engraving")
+  isFractionalQty         Boolean   @default(false) @map("is_fractional_qty")
+
+  // NEW v2.0 fields
+  ownership          String? @map("ownership") @db.VarChar(10) // HAL / OTHER
+  // NEW: Derived by IFS fetch per HAL rule — REP PO/REP FOC → Repair, PO → Company.
+  // Kept separate from `ownership` (HAL/OTHER) which is SITS-owned workflow data.
+  poOwnership        String? @map("po_ownership") @db.VarChar(10) // Repair | Company
+  topMarkingPhotoUrl String? @map("top_marking_photo_url")
+  sitsStatus         String  @default("OPEN") @map("sits_status") // OPEN | COUNTED | QC_ACCEPTED | TAGGING | TAGGED | TRANSFERRED | RECEIVED
+
+  // NEW: IFS line STATUS = Rejected → TERMINAL. Set once by the IFS sync and
+  // never revisited — the line stays frozen in SITS even if IFS later changes
+  // (flow cells 533/534/543: "save as rejected in SITS, never query again").
+  ifsRejected   Boolean   @default(false) @map("ifs_rejected")
+  ifsRejectedAt DateTime? @map("ifs_rejected_at") @db.Timestamptz()
+
+  rr               Rr                @relation(fields: [rrId], references: [id], onDelete: Cascade)
+  packetTags       PacketTag[]
+  transferLines    TransferLine[]
+  lineCounts       LineCount[] // NEW RELATION
+  binningPlanLines BinningPlanLine[]
+
+  @@unique([rrId, rrLineNo])
+  @@index([qcStatus])
+  @@index([sitsStatus])
+  @@map("rr_lines")
+}
+
+// ─── Item Master ─────────────────────────────────────────────
+model ItemMaster {
+  itemCode       String   @id @map("item_code")
+  description    String?                             // comes from ifs
+  stockingUom    String?  @map("stocking_uom")
+  vendorUom      String?  @map("vendor_uom") // comes from ifs (INVENTORY_PART.UNIT_MEAS)
+  countingMethod String?  @map("counting_method") // comes from ifs (PART_CATALOG.SERIAL_RULE)
+  uomConvFactor  Decimal? @map("uom_conv_factor") @db.Decimal(18, 6)
+  weightNet      Decimal? @map("weight_net") // comes from ifs (INVENTORY_PART.WEIGHT_NET)
+  unitWeightG    Decimal? @map("unit_weight_g") @db.Decimal(18, 6) // NEW
+  assetClass     String?  @map("asset_class") // NEW
+  isSerialized   Boolean  @default(false) @map("is_serialized") // comes from ifs (PART_CATALOG.SERIAL_TRACKING_CODE / SERIAL_RULE)
+  reelAttrs      Json?    @map("reel_attrs")
+  locationNo     String?  @map("location_no") // NEW: default IFS stock location (INVENTORY_PART_LOCATION)
+  cachedAt       DateTime @default(now()) @map("cached_at") @db.Timestamptz()
+
+  location ItemLocation? @relation(fields: [locationNo], references: [locationNo], onDelete: SetNull)
+ serials    Serial[]
+
+  @@index([locationNo])
+  @@map("item_master")
+}
+
+
+model Serial {
+  id       Int    @id @default(autoincrement())
+  itemCode String @map("item_code") // comes from ifs (INVENTORY_PART_LOCATION.PART_NO)
+  serialNo String @map("serial_no") // comes from ifs (INVENTORY_PART_LOCATION.SERIAL_NO)
+
+  item ItemMaster @relation(fields: [itemCode], references: [itemCode])
+
+  @@unique([itemCode, serialNo])
+  @@index([itemCode])
+  @@map("serial")
+}
+
+// ─── Item Location (IFS INVENTORY_PART_LOCATION mirror) ───────
+model ItemLocation {
+  id           BigInt   @id @default(autoincrement())
+  locationNo   String   @unique @map("location_no") // comes from ifs (INVENTORY_PART_LOCATION.LOCATION_NO)
+  locationName String?  @map("location_name") // comes from ifs (INVENTORY_PART_LOCATION.LOCATION_NAME)
+  warehouse    String?  @map("warehouse") // comes from ifs (INVENTORY_PART_LOCATION.WAREHOUSE)
+  bayNo        String?  @map("bay_no") // comes from ifs (INVENTORY_PART_LOCATION.BAY_NO)
+  rowNo        String?  @map("row_no") // comes from ifs (INVENTORY_PART_LOCATION.ROW_NO)
+  tierNo       String?  @map("tier_no") // comes from ifs (INVENTORY_PART_LOCATION.TIER_NO)
+  binNo        String?  @map("bin_no") // comes from ifs (INVENTORY_PART_LOCATION.BIN_NO)
+  cachedAt     DateTime @default(now()) @map("cached_at") @db.Timestamptz()
+
+  itemMasters ItemMaster[]
+
+  @@index([warehouse])
+  @@map("item_location")
+}
+
+
+
+// ─── Approved Alternates ─────────────────────────────────────
+model ApprovedAlternate {
+  id            BigInt   @id @default(autoincrement())
+  orderedItem   String   @map("ordered_item")
+  alternateItem String   @map("alternate_item")
+  isApproved    Boolean  @default(true) @map("is_approved")
+  cachedAt      DateTime @default(now()) @map("cached_at") @db.Timestamptz()
+
+  @@unique([orderedItem, alternateItem])
+  @@index([orderedItem])
+  @@map("approved_alternates")
+}
+
+// ─── NEW: Line Count (Phase 2 - Counting BEFORE Tagging) ─────
+model LineCount {
+  id                BigInt   @id @default(autoincrement())
+  rrLineId          BigInt   @map("rr_line_id")
+  method            String // MANUAL | WEIGHT | REEL
+  numPackages       Int      @map("num_packages")
+  qtyPerPackage     Decimal  @map("qty_per_package") @db.Decimal(18, 4)
+  unitWeightG       Decimal? @map("unit_weight_g") @db.Decimal(18, 6)
+  totalWeightG      Decimal? @map("total_weight_g") @db.Decimal(18, 4)
+  reelReadingMtr    Decimal? @map("reel_reading_mtr") @db.Decimal(18, 4)
+  pitchMm           Decimal? @map("pitch_mm") @db.Decimal(18, 4)
+  calculatedQty     Decimal  @map("calculated_qty") @db.Decimal(18, 4)
+  operatorEditedQty Decimal? @map("operator_edited_qty") @db.Decimal(18, 4)
+  finalCountedQty   Decimal  @map("final_counted_qty") @db.Decimal(18, 4)
+  ifsChallanQty     Decimal  @map("ifs_challan_qty") @db.Decimal(18, 4)
+  varianceQty       Decimal  @map("variance_qty") @db.Decimal(18, 4)
+  varianceFlag      Boolean  @default(false) @map("variance_flag")
+  deviceId          String?  @map("device_id")
+  countedBy         String?  @map("counted_by") @db.Uuid
+  countedAt         DateTime @default(now()) @map("counted_at") @db.Timestamptz()
+  notes             String?
+
+  rrLine        RrLine  @relation(fields: [rrLineId], references: [id], onDelete: Cascade)
+  packetTags    PacketTag[] // NEW RELATION
+  countedByUser User?   @relation("LineCountCountedBy", fields: [countedBy], references: [id], onDelete: SetNull)
+
+  @@index([rrLineId])
+  @@index([method])
+  @@index([varianceFlag])
+  @@index([countedBy])
+  @@map("line_count")
+}
+
+// ─── Packet Tag ──────────────────────────────────────────────
+model PacketTag {
+  id               BigInt   @id @default(autoincrement())
+  epc              String   @unique
+  rrLineId         BigInt   @map("rr_line_id")
+  lineCountId      BigInt?  @map("line_count_id") // NEW: Link to LineCount
+  packetNo         Int      @map("packet_no")
+  batchNo          String?  @map("batch_no")
+  colour           String?
+  colourCategory   String?  @map("colour_category") // NEW: SINGLE | DUAL
+  itemCode         String   @map("item_code")
+  originalItemCode String?  @map("original_item_code")
+  qty              Decimal  @db.Decimal(18, 4)
+  uom              String
+  status           String   @default("CREATED")
+  taggedBy         String?  @map("tagged_by") @db.Uuid
+  taggedAt         DateTime @default(now()) @map("tagged_at") @db.Timestamptz()
+
+  tagType      String    @default("RFID") @map("tag_type")
+  serialNumber String?   @unique @map("serial_number")
+  barcode      String?   @unique
+  materialType String?   @map("material_type")
+  isVoided     Boolean   @default(false) @map("is_voided")
+  voidReason   String?   @map("void_reason")
+  voidedAt     DateTime? @map("voided_at") @db.Timestamptz()
+  cocDocLink   String?   @map("coc_doc_link")
+
+  // NEW v2.0 fields
+  printStatus    String    @default("PENDING") @map("print_status") // PENDING | PRINTED | FAILED
+  printedAt      DateTime? @map("printed_at") @db.Timestamptz()
+  readBackEpc    String?   @map("read_back_epc")
+  commissionedAt DateTime? @map("commissioned_at") @db.Timestamptz()
+
+  rrLine                 RrLine                  @relation(fields: [rrLineId], references: [id], onDelete: Cascade)
+  lineCount              LineCount?              @relation(fields: [lineCountId], references: [id], onDelete: SetNull)
+  baseline               Baseline?
+  countChecks            CountCheck[]
+  transferLines          TransferLine[]
+  storageConf            StorageConfirmation?
+  binningPlanLines       BinningPlanLine[]
+  placementConfirmations PlacementConfirmation[]
+
+  @@unique([rrLineId, packetNo])
+  @@index([status])
+  @@map("packet_tags")
+}
+
+// ─── Event Log ──────────────────────────────────────────────
+model EventLog {
+  id         BigInt   @id @default(autoincrement())
+  ref        String?
+  eventType  String   @map("event_type")
+  phase      String?
+  device     String?
+  appUser    String?  @map("app_user") @db.Uuid
+  payload    Json?
+  occurredAt DateTime @default(now()) @map("occurred_at") @db.Timestamptz()
+
+  @@index([ref])
+  @@index([eventType])
+  @@map("event_log")
+}
+
+// ─── Device Registry ─────────────────────────────────────────
+model DeviceRegistry {
+  id                    BigInt    @id @default(autoincrement())
+  deviceId              String    @unique @map("device_id")
+  deviceType            String    @map("device_type")
+  location              String
+  displayName           String    @map("display_name")
+  controllerHost        String    @map("controller_host")
+  controllerPort        Int       @map("controller_port")
+  controllerProtocol    String    @default("HTTP") @map("controller_protocol")
+  machineIdOnController String?   @map("machine_id_on_controller")
+  endpointPath          String?   @map("endpoint_path")
+  config                Json?
+  isActive              Boolean   @default(true) @map("is_active")
+  lastSeenAt            DateTime? @map("last_seen_at") @db.Timestamptz()
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
+
+  planDownloads          PlanDownload[]
+  placementConfirmations PlacementConfirmation[]
+  syncLogs               SyncLog[]
+  syncStates             PlanSyncState[]
+
+  @@index([deviceType, location])
+  @@index([controllerHost])
+  @@index([isActive])
+  @@map("device_registry")
+}
+
+// ─── Baseline ────────────────────────────────────────────────
+model Baseline {
+  id             BigInt   @id @default(autoincrement())
+  packetTagId    BigInt   @unique @map("packet_tag_id")
+  method         String
+  unitWeight     Decimal? @map("unit_weight") @db.Decimal(18, 6)
+  totalWeight    Decimal? @map("total_weight") @db.Decimal(18, 4)
+  baselineCount  Decimal  @map("baseline_count") @db.Decimal(18, 4)
+  ifsQtyAtCount  Decimal  @map("ifs_qty_at_count") @db.Decimal(18, 4)
+  varianceFlag   Boolean  @default(false) @map("variance_flag")
+  varianceAmount Decimal? @map("variance_amount") @db.Decimal(18, 4)
+  deviceId       String?  @map("device_id")
+  countedBy      String?  @map("counted_by") @db.Uuid
+  countedAt      DateTime @default(now()) @map("counted_at") @db.Timestamptz()
+  notes          String?
+
+  packetTag     PacketTag    @relation(fields: [packetTagId], references: [id], onDelete: Cascade)
+  countedByUser User?        @relation("BaselineCountedBy", fields: [countedBy], references: [id], onDelete: SetNull)
+  countChecks   CountCheck[]
+
+  @@index([method])
+  @@index([varianceFlag])
+  @@index([countedAt])
+  @@index([countedBy])
+  @@map("baseline")
+}
+
+// ─── Variance ────────────────────────────────────────────────
+model Variance {
+  id             BigInt    @id @default(autoincrement())
+  context        String
+  ref            String
+  expectedQty    Decimal?  @map("expected_qty") @db.Decimal(18, 4)
+  actualQty      Decimal?  @map("actual_qty") @db.Decimal(18, 4)
+  varianceAmount Decimal?  @map("variance_amount") @db.Decimal(18, 4)
+  disposition    String    @default("PENDING")
+  raisedBy       String?   @map("raised_by") @db.Uuid
+  raisedAt       DateTime  @default(now()) @map("raised_at") @db.Timestamptz()
+  resolvedBy     String?   @map("resolved_by") @db.Uuid
+  resolvedAt     DateTime? @map("resolved_at") @db.Timestamptz()
+  notes          String?
+
+  @@index([context, ref])
+  @@index([disposition])
+  @@map("variance")
+}
+
+// ─── Transfer ────────────────────────────────────────────────
+model Transfer {
+  id           BigInt    @id @default(autoincrement())
+  transferId   String    @unique @map("transfer_id")
+  status       String    @default("CREATED")
+  fromLocation String    @default("TRANSIT") @map("from_location") // NEW
+  toLocation   String?   @map("to_location") // NEW
+  createdBy    String?   @map("created_by") @db.Uuid
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  dispatchedAt DateTime? @map("dispatched_at") @db.Timestamptz() // NEW
+  receivedAt   DateTime? @map("received_at") @db.Timestamptz() // NEW
+
+  lines TransferLine[]
+
+  @@index([status])
+  @@map("transfer")
+}
+
+// ─── Transfer Line ───────────────────────────────────────────
+model TransferLine {
+  id          BigInt   @id @default(autoincrement())
+  transferId  BigInt   @map("transfer_id")
+  packetTagId BigInt   @map("packet_tag_id")
+  rrLineId    BigInt   @map("rr_line_id")
+  epc         String
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  isReceived  Boolean   @default(false) @map("is_received")
+  receivedAt  DateTime? @map("received_at") @db.Timestamptz()
+  isMissing   Boolean   @default(false) @map("is_missing")
+  isExtra     Boolean   @default(false) @map("is_extra") // NEW
+  receivedQty Decimal?  @map("received_qty") @db.Decimal(18, 4)
+  missingQty  Decimal?  @map("missing_qty") @db.Decimal(18, 4)
+  notes       String?
+
+  transfer  Transfer  @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  packetTag PacketTag @relation(fields: [packetTagId], references: [id], onDelete: Cascade)
+  rrLine    RrLine    @relation(fields: [rrLineId], references: [id], onDelete: Cascade)
+
+  @@index([transferId])
+  @@index([packetTagId])
+  @@index([rrLineId])
+  @@index([epc])
+  @@index([isReceived])
+  @@index([isMissing])
+  @@map("transfer_line")
+}
+
+// ─── Count Check ─────────────────────────────────────────────
+model CountCheck {
+  id              BigInt   @id @default(autoincrement())
+  packetTagId     BigInt   @map("packet_tag_id")
+  baselineId      BigInt   @map("baseline_id")
+  actualCount     Decimal  @map("actual_count") @db.Decimal(18, 4)
+  baselineCount   Decimal  @map("baseline_count") @db.Decimal(18, 4)
+  matchesBaseline Boolean  @map("matches_baseline")
+  varianceAmount  Decimal? @map("variance_amount") @db.Decimal(18, 4)
+  withinTolerance Boolean  @default(true) @map("within_tolerance")
+  managerOverride Boolean  @default(false) @map("manager_override")
+  overrideNotes   String?  @map("override_notes")
+  deviceId        String?  @map("device_id")
+  checkedBy       String?  @map("checked_by") @db.Uuid
+  checkedAt       DateTime @default(now()) @map("checked_at") @db.Timestamptz()
+
+  packetTag PacketTag @relation(fields: [packetTagId], references: [id], onDelete: Cascade)
+  baseline  Baseline  @relation(fields: [baselineId], references: [id], onDelete: Cascade)
+
+  @@index([packetTagId])
+  @@index([baselineId])
+  @@index([matchesBaseline])
+  @@index([checkedAt])
+  @@map("count_check")
+}
+
+// ─── NEW: Storage Confirmation (Phase 9 - Put-away) ──────────
+model StorageConfirmation {
+  id               BigInt   @id @default(autoincrement())
+  packetTagId      BigInt   @unique @map("packet_tag_id")
+  binRfidEpc       String   @map("bin_rfid_epc")
+  ifsLocationNo    String?  @map("ifs_location_no")
+  warehouse        String?
+  binNo            String?  @map("bin_no")
+  confirmedBy      String?  @map("confirmed_by") @db.Uuid
+  confirmedAt      DateTime @default(now()) @map("confirmed_at") @db.Timestamptz()
+  syncedFromDevice String?  @map("synced_from_device")
+
+  packetTag PacketTag @relation(fields: [packetTagId], references: [id], onDelete: Cascade)
+
+  @@index([binRfidEpc])
+  @@map("storage_confirmation")
+}
+
+// ─── NEW: Stock Verification (Phase 10 - Physical audit) ──────
+model StockVerificationRun {
+  id            BigInt    @id @default(autoincrement())
+  runRef        String    @unique @map("run_ref")
+  trigger       String    @map("trigger") // DEVICE | MANUAL | SCHEDULED
+  locationNo    String?   @map("location_no")
+  warehouse     String?   @map("warehouse")
+  binRfidEpc    String?   @map("bin_rfid_epc")
+  deviceId      String?   @map("device_id")
+  operatorId    String?   @map("operator_id") @db.Uuid
+  offline       Boolean   @default(false) @map("offline")
+  syncedAt      DateTime? @map("synced_at") @db.Timestamptz()
+  foundCount    Int       @default(0) @map("found_count")
+  notFoundCount Int       @default(0) @map("not_found_count")
+  extraCount    Int       @default(0) @map("extra_count")
+  status        String    @default("COMPLETED") @map("status")
+  runAt         DateTime  @default(now()) @map("run_at") @db.Timestamptz()
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
+
+  lines StockVerificationLine[]
+
+  @@index([trigger])
+  @@index([locationNo])
+  @@index([runAt])
+  @@map("stock_verification_run")
+}
+
+model StockVerificationLine {
+  id          BigInt  @id @default(autoincrement())
+  runId       BigInt  @map("run_id")
+  outcome     String  @map("outcome") // FOUND | NOT_FOUND | EXTRA
+  itemCode    String  @map("item_code")
+  itemDesc    String? @map("item_desc")
+  lotBatchNo  String? @map("lot_batch_no")
+  epc         String? @map("epc")
+  packetTagId BigInt? @map("packet_tag_id")
+  qtyFound    Decimal @map("qty_found") @db.Decimal(18, 4)
+  qtyExpected Decimal @map("qty_expected") @db.Decimal(18, 4)
+  varianceQty Decimal @map("variance_qty") @db.Decimal(18, 4)
+  note        String?
+
+  run StockVerificationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+  @@index([outcome])
+  @@index([itemCode])
+  @@map("stock_verification_line")
+}
+
+// ─── Alert ───────────────────────────────────────────────────
+model Alert {
+  id                 BigInt    @id @default(autoincrement())
+  alertType          String    @default("GENERAL") @map("alert_type")
+  type               String
+  severity           String    @default("WARNING")
+  ref                String?
+  message            String
+  status             String    @default("OPEN")
+  recipientRoles     String    @map("recipient_roles")
+  channel            String    @default("in-app")
+  sourceFn           String?   @map("source_fn")
+  meta               Json?
+  payload            Json?
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  acknowledgedBy     String?   @map("acknowledged_by") @db.Uuid
+  acknowledgedAt     DateTime? @map("acknowledged_at") @db.Timestamptz()
+  resolvedAt         DateTime? @map("resolved_at") @db.Timestamptz()
+  acknowledgedByUser User?     @relation("AlertAcknowledgedBy", fields: [acknowledgedBy], references: [id], onDelete: SetNull)
+
+  @@index([ref])
+  @@index([alertType])
+  @@index([acknowledgedAt])
+  @@index([status])
+  @@map("alert")
+}
+
+// ─── Storage Hierarchy (physical warehouse layout) ────────────
+// SITS-owned physical layout, seeded by prisma/seed-sits.ts.
+// Codes are kept in lock-step with the IFS INVENTORY_PART_LOCATION mirror
+// (ItemLocation.warehouse/bayNo/rowNo/tierNo/binNo). Each Tier and Bin carries
+// its physical RFID tag directly (tierRfid / binRfid).
+model Warehouse {
+  id        Int     @id @default(autoincrement())
+  code      String
+  name      String?
+  bays      Bay[]
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  @@unique([code])
+  @@map("warehouses")
+}
+
+model Bay {
+  id          Int       @id @default(autoincrement())
+  warehouseId Int       @map("warehouse_id")
+  code        String
+  name        String?
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
+
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  rows      Row[]
+
+  @@unique([warehouseId, code])
+  @@index([warehouseId])
+  @@map("bays")
+}
+
+model Row {
+  id        Int      @id @default(autoincrement())
+  bayId     Int      @map("bay_id")
+  code      String
+  name      String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  bay   Bay    @relation(fields: [bayId], references: [id], onDelete: Cascade)
+  tiers Tier[]
+
+  @@unique([bayId, code])
+  @@index([bayId])
+  @@map("rows")
+}
+
+model Tier {
+  id        Int      @id @default(autoincrement())
+  rowId     Int      @map("row_id")
+  code      String
+  name      String?
+  tierRfid  String   @unique @map("tier_rfid")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  row  Row   @relation(fields: [rowId], references: [id], onDelete: Cascade)
+  bins Bin[]
+
+  @@unique([rowId, code])
+  @@index([rowId])
+  @@map("tiers")
+}
+
+model Bin {
+  id        Int      @id @default(autoincrement())
+  tierId    Int      @map("tier_id")
+  code      String
+  name      String?
+  binRfid   String   @unique @map("bin_rfid")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  tier Tier @relation(fields: [tierId], references: [id], onDelete: Cascade)
+
+  @@unique([tierId, code])
+  @@index([tierId])
+  @@map("bins")
+}
+
+// ─── Binning Plan ─────────────────────────────────────────────
+model BinningPlan {
+  id          BigInt    @id @default(autoincrement())
+  planId      String    @unique @map("plan_id")
+  version     Int       @default(1) @map("version")
+  status      String    @default("DRAFT") @map("status")
+  source      String    @default("IFS") @map("source")
+  fetchedBy   String?   @map("fetched_by") @db.Uuid
+  fetchedAt   DateTime  @default(now()) @map("fetched_at") @db.Timestamptz()
+  activatedAt DateTime? @map("activated_at") @db.Timestamptz()
+  archivedAt  DateTime? @map("archived_at") @db.Timestamptz()
+  notes       String?
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
+
+  lines         BinningPlanLine[]
+  downloads     PlanDownload[]
+  syncStates    PlanSyncState[]
+  fetchedByUser User?             @relation("BinningPlanFetchedBy", fields: [fetchedBy], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([fetchedAt])
+  @@map("binning_plan")
+}
+
+// ─── Binning Plan Line ────────────────────────────────────────
+model BinningPlanLine {
+  id            BigInt   @id @default(autoincrement())
+  planId        BigInt   @map("plan_id")
+  lineNo        Int      @map("line_no")
+  rrLineId      BigInt?  @map("rr_line_id")
+  packetTagId   BigInt?  @map("packet_tag_id")
+  itemCode      String   @map("item_code")
+  expectedQty   Decimal  @map("expected_qty") @db.Decimal(18, 4)
+  binId         String   @map("bin_id")
+  positionId    String?  @map("position_id")
+  locationTagId String?  @map("location_tag_id")
+  status        String   @default("PENDING") @map("status")
+  notes         String?
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  plan          BinningPlan             @relation(fields: [planId], references: [id], onDelete: Cascade)
+  rrLine        RrLine?                 @relation(fields: [rrLineId], references: [id], onDelete: SetNull)
+  packetTag     PacketTag?              @relation(fields: [packetTagId], references: [id], onDelete: SetNull)
+  confirmations PlacementConfirmation[]
+
+  @@unique([planId, lineNo])
+  @@index([planId])
+  @@index([rrLineId])
+  @@index([packetTagId])
+  @@index([binId, positionId])
+  @@index([status])
+  @@map("binning_plan_line")
+}
+
+// ─── Plan Download (to handheld) ──────────────────────────────
+model PlanDownload {
+  id           BigInt    @id @default(autoincrement())
+  planId       BigInt    @map("plan_id")
+  deviceId     BigInt    @map("device_id")
+  downloadedAt DateTime  @default(now()) @map("downloaded_at") @db.Timestamptz()
+  downloadedBy String?   @map("downloaded_by") @db.Uuid
+  status       String    @default("DOWNLOADED") @map("status")
+  syncedAt     DateTime? @map("synced_at") @db.Timestamptz()
+  expiresAt    DateTime? @map("expires_at") @db.Timestamptz()
+  errorMessage String?   @map("error_message")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
+
+  plan   BinningPlan    @relation(fields: [planId], references: [id], onDelete: Cascade)
+  device DeviceRegistry @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  user   User?          @relation("PlanDownloadDownloadedBy", fields: [downloadedBy], references: [id], onDelete: SetNull)
+
+  @@unique([planId, deviceId])
+  @@index([planId])
+  @@index([deviceId])
+  @@index([status])
+  @@index([downloadedAt])
+  @@map("plan_download")
+}
+
+// ─── Plan Sync State (per device per plan) ────────────────────────
+model PlanSyncState {
+  id                   BigInt    @id @default(autoincrement())
+  planId               BigInt    @map("plan_id")
+  deviceId             BigInt    @map("device_id")
+  lastSyncedAt         DateTime  @default(now()) @map("last_synced_at") @db.Timestamptz()
+  lastConfirmedAt      DateTime? @map("last_confirmed_at") @db.Timestamptz()
+  pendingConfirmations Int       @default(0) @map("pending_confirmations")
+  lastError            String?   @map("last_error")
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
+
+  plan   BinningPlan    @relation(fields: [planId], references: [id], onDelete: Cascade)
+  device DeviceRegistry @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([planId, deviceId])
+  @@index([planId])
+  @@index([deviceId])
+  @@index([lastSyncedAt])
+  @@map("plan_sync_state")
+}
+
+// ─── Placement Confirmation ───────────────────────────────────
+model PlacementConfirmation {
+  id                    BigInt    @id @default(autoincrement())
+  planLineId            BigInt    @map("plan_line_id")
+  packetTagId           BigInt    @map("packet_tag_id")
+  expectedLocationTagId String    @map("expected_location_tag_id")
+  actualLocationTagId   String?   @map("actual_location_tag_id")
+  expectedBinId         String    @map("expected_bin_id")
+  expectedPositionId    String?   @map("expected_position_id")
+  actualBinId           String?   @map("actual_bin_id")
+  actualPositionId      String?   @map("actual_position_id")
+  status                String    @default("CONFIRMED") @map("status")
+  mismatchReason        String?   @map("mismatch_reason")
+  deviceId              BigInt    @map("device_id")
+  operatorId            String    @map("operator_id") @db.Uuid
+  isOffline             Boolean   @default(false) @map("is_offline")
+  confirmedAt           DateTime  @default(now()) @map("confirmed_at") @db.Timestamptz()
+  syncedAt              DateTime? @map("synced_at") @db.Timestamptz()
+  syncLogId             BigInt?   @map("sync_log_id")
+  notes                 String?
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
+
+  planLine        BinningPlanLine @relation(fields: [planLineId], references: [id], onDelete: Cascade)
+  packetTag       PacketTag       @relation(fields: [packetTagId], references: [id], onDelete: Cascade)
+  device          DeviceRegistry  @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  operator        User            @relation("PlacementConfirmationOperator", fields: [operatorId], references: [id], onDelete: Restrict)
+  syncLog         SyncLog?        @relation(fields: [syncLogId], references: [id], onDelete: SetNull)
+
+  @@index([planLineId])
+  @@index([packetTagId])
+  @@index([expectedLocationTagId])
+  @@index([actualLocationTagId])
+  @@index([deviceId])
+  @@index([operatorId])
+  @@index([isOffline])
+  @@index([confirmedAt])
+  @@index([syncedAt])
+  @@index([syncLogId])
+  @@map("placement_confirmation")
+}
+
+// ─── Sync Log (re-dock synchronization) ───────────────────────
+model SyncLog {
+  id                    BigInt    @id @default(autoincrement())
+  deviceId              BigInt    @map("device_id")
+  startedAt             DateTime  @default(now()) @map("started_at") @db.Timestamptz()
+  completedAt           DateTime? @map("completed_at") @db.Timestamptz()
+  status                String    @default("IN_PROGRESS") @map("status")
+  confirmationsUploaded Int       @default(0) @map("confirmations_uploaded")
+  conflictsDetected     Int       @default(0) @map("conflicts_detected")
+  errorMessage          String?   @map("error_message")
+  metadata              Json?
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
+
+  device        DeviceRegistry          @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  confirmations PlacementConfirmation[]
+
+  @@index([deviceId])
+  @@index([startedAt])
+  @@index([status])
+  @@map("sync_log")
+}
+
+// ─── NEW: IFS Polling Config (Admin-configurable policy) ──────
+model IfsPollingConfig {
+  id                 String   @id @default(uuid()) @db.Uuid
+  configKey          String   @unique @default("default") @map("config_key")
+  enabled            Boolean  @default(true) @map("enabled")
+  normalIntervalMs   Int      @default(300000) @map("normal_interval_ms") // 5 min
+  // JSON array of consecutive-failure ranges, e.g.
+  // [{min:1,max:2,intervalMs:300000,notify:true},{min:3,max:4,intervalMs:1200000,notify:true}]
+  failureRanges      Json     @default("[]") @map("failure_ranges")
+  stopThreshold      Int      @default(5) @map("stop_threshold")
+  batchSize          Int      @default(25) @map("batch_size")
+  fetchReadyQcStatus String   @default("INSPECTED") @map("fetch_ready_qc_status")
+  rePollEnabled      Boolean  @default(true) @map("re_poll_enabled") // flow cell 543
+  rePollIntervalMs   Int      @default(300000) @map("re_poll_interval_ms") // 5 min
+  notifyAdminRoles   Json     @default("[\"admin\"]") @map("notify_admin_roles")
+  updatedBy          String?  @map("updated_by") @db.Uuid
+  updatedAt          DateTime @updatedAt @map("updated_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  @@map("ifs_polling_config")
+}
+
+// ─── NEW: IFS Polling State (persists across restarts) ────────
+model IfsSyncState {
+  id                      String    @id @default(uuid()) @db.Uuid
+  stateKey                String    @unique @default("polling") @map("state_key")
+  status                  String    @default("RUNNING") // RUNNING | STOPPED
+  lastPollStartedAt       DateTime? @map("last_poll_started_at") @db.Timestamptz()
+  lastSuccessfulPoll      DateTime? @map("last_successful_poll") @db.Timestamptz()
+  lastFailedPoll          DateTime? @map("last_failed_poll") @db.Timestamptz()
+  consecutiveFailureCount Int       @default(0) @map("consecutive_failure_count")
+  currentIntervalMs       Int       @map("current_interval_ms")
+  lastError               String?   @map("last_error")
+  stopReason              String?   @map("stop_reason")
+  restartedBy             String?   @map("restarted_by") @db.Uuid
+  restartedAt             DateTime? @map("restarted_at") @db.Timestamptz()
+  lastRepollAt            DateTime? @map("last_repoll_at") @db.Timestamptz()
+  lastRepollCount         Int?      @map("last_repoll_count")
+  lastRepollError         String?   @map("last_repoll_error")
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("ifs_sync_state")
+}
+
+// ─── NEW: Per Gate-Entry sync outcome (retry-safe) ────────────
+model IfsGateEntrySyncState {
+  id           BigInt    @id @default(autoincrement())
+  gateEntryNo  String    @unique @map("gate_entry_no")
+  status       String    @default("PENDING") // PENDING | SYNCED | FAILED
+  lastSyncedAt DateTime? @map("last_synced_at") @db.Timestamptz()
+  lastError    String?   @map("last_error")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@index([status])
+  @@map("ifs_gate_entry_sync_state")
+}
+
+// ─── NEW: IFS Sync Watermark (Poller Track) ──────────────────
+model IfsSyncWatermark {
+  id           String   @id @default(uuid()) @db.Uuid
+  resource     String   @unique
+  lastSyncedAt DateTime @map("last_synced_at") @db.Timestamptz()
+  lastCursor   String?  @map("last_cursor")
+  status       String   @default("HEALTHY")
+  lastError    String?  @map("last_error")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("ifs_sync_watermarks")
+}

@@ -1,0 +1,63 @@
+import { EventType } from "../enums/event.enum.js";
+
+/**
+ * Legacy map preserved for backwards compatibility, mapped directly to `EventType`.
+ */
+export const EVENT_TYPES = {
+  // Phase 1: Fetch & QC
+  RR_FETCHED: EventType.RR_FETCHED,
+  LINE_QC_STATUS_CHANGED: EventType.LINE_QC_STATUS_CHANGED,
+  OWNERSHIP_SET: EventType.OWNERSHIP_SET,
+
+  // Phase 2: Counting (line-level, BEFORE tagging)
+  LINE_COUNT_STARTED: EventType.LINE_COUNT_STARTED,
+  LINE_COUNT_CAPTURED: EventType.LINE_COUNT_CAPTURED,
+  LINE_COUNT_VARIANCE: EventType.LINE_COUNT_VARIANCE,
+  LINE_COUNT_APPROVED: EventType.LINE_COUNT_APPROVED,
+
+  // Phase 3: QC Accept
+  QC_ACCEPTED: EventType.QC_ACCEPTED,
+  QC_REJECTED: EventType.QC_REJECTED,
+
+  // Phase 4: Tag
+  TAGGING_STARTED: EventType.TAGGING_STARTED,
+  TAG_GENERATED: EventType.TAG_GENERATED,
+  TAG_PRINTED: EventType.TAG_PRINTED,
+  TAG_COMMISSIONED: EventType.TAG_COMMISSIONED,
+  TAG_VOIDED: EventType.TAG_VOIDED,
+  TOP_MARKING_PHOTO_CAPTURED: EventType.TOP_MARKING_PHOTO_CAPTURED,
+
+  // Legacy alias — keep so old code doesn't break
+  TAGGED: EventType.TAGGED,
+  COMMISSIONED: EventType.TAG_COMMISSIONED,
+  BASELINE_COUNTED: EventType.BASELINE_COUNTED,
+  BASELINE_VARIANCE: EventType.BASELINE_VARIANCE,
+
+  // Phase 5: Transfer
+  TRANSIT_EXIT_SCANNED: EventType.TRANSIT_EXIT_SCANNED,
+  TRANSFER_CREATED: EventType.TRANSFER_CREATED,
+  UNAPPROVED_TAG_DETECTED: EventType.UNAPPROVED_TAG_DETECTED,
+
+  // Phase 6: Gate
+  GATE_EXIT_OK: EventType.GATE_EXIT_OK,
+  GATE_ALARM: EventType.GATE_ALARM,
+
+  // Phase 7: Holding
+  HOLDING_IN: EventType.HOLDING_IN,
+  HOLDING_MISSING: EventType.HOLDING_MISSING,
+  HOLDING_EXTRA: EventType.HOLDING_EXTRA,
+  ALTERNATE_RECONCILED: EventType.ALTERNATE_RECONCILED,
+  ALTERNATE_MISMATCH: EventType.ALTERNATE_MISMATCH,
+
+  // Phase 8: Count-Check
+  COUNT_CHECKED: EventType.COUNT_CHECKED,
+  COUNT_MISMATCH: EventType.COUNT_MISMATCH,
+
+  // Phase 9: Put-away
+  BIN_LOCATED: EventType.BIN_LOCATED,
+  PUT_AWAY_CONFIRMED: EventType.PUT_AWAY_CONFIRMED,
+  PUT_AWAY_SYNCED: EventType.PUT_AWAY_SYNCED,
+
+  // Phase 10: Stock Verification (physical audit vs IFS stock)
+  STOCK_VERIFICATION_COMPLETED: EventType.STOCK_VERIFICATION_COMPLETED,
+} as const;
